@@ -1,6 +1,7 @@
 import { UploadedFile } from '../types';
 
 // API Configuration
+// If VITE_API_URL is set, use it. Otherwise relative paths (via proxy)
 const ENV_API_URL = (import.meta as any).env?.VITE_API_URL;
 const BASE_API_URL = ENV_API_URL || ''; 
 
@@ -9,7 +10,7 @@ class DatabaseService {
   constructor() {}
 
   getConnectionStatus(): 'cloud' | 'local' {
-    return 'cloud'; // Always server-based now
+    return 'cloud';
   }
 
   // Fetch all file metadata
@@ -19,7 +20,8 @@ class DatabaseService {
       if (!response.ok) throw new Error("Failed to fetch files");
       return await response.json();
     } catch (error) {
-      console.error("API Error:", error);
+      console.error("API Error - Fetch Files:", error);
+      // Return empty array to prevent UI crash, but log error
       return [];
     }
   }
@@ -40,14 +42,13 @@ class DatabaseService {
     return result.file;
   }
 
-  // Maintain interface compatibility (though deprecated logic removed)
-  async addFile(file: UploadedFile): Promise<void> {
-    // This is handled by uploadFile now
-  }
-
+  // Delete file
   async deleteFile(id: string): Promise<void> {
     await fetch(`${BASE_API_URL}/files/${id}`, { method: 'DELETE' });
   }
+
+  // Deprecated methods kept for interface safety if needed
+  async addFile(file: UploadedFile): Promise<void> {}
 }
 
 export const db = new DatabaseService();

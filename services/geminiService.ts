@@ -12,9 +12,14 @@ export const streamResponse = async (
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
         message: userPrompt,
-        history: history.filter(m => m.role !== 'model' || !m.isLoading)
+        // Send simplified history to backend
+        history: history.filter(m => !m.isLoading && (m.role === 'user' || m.role === 'model'))
       })
     });
+
+    if (!response.ok) {
+        throw new Error(`Server error: ${response.status}`);
+    }
 
     if (!response.body) throw new Error("No response body");
 
@@ -32,22 +37,23 @@ export const streamResponse = async (
     }
 
     // Post-processing for JSON Charts
-    // Try to find JSON block in the full text
-    const jsonMatch = fullText.match(/\{[\s\S]*\}/);
+    // Try to find JSON block in the full text for charts
+    // We look for the specific pattern {"chart": ... }
+    const jsonMatch = fullText.match(/\{[\s\S]*"chart"[\s\S]*\}/);
     if (jsonMatch) {
       try {
-        const cleanJson = jsonMatch[0].replace(/```json\s*/g, "").replace(/```\s*/g, "");
-        const parsed = JSON.parse(cleanJson);
+        const possibleJson = jsonMatch[0];
+        const parsed = JSON.parse(possibleJson);
         if (parsed.chart) {
-          // If pure JSON was returned, we might want to clean the text shown to user
-          // Or just attach the chart data
-          return {
-            text: parsed.message || (fullText.includes("```") ? "Gráfico gerado:" : fullText),
-            chartData: parsed.chart
-          };
+            // Remove the raw JSON from the displayed text to keep it clean
+            const cleanText = fullText.replace(possibleJson, "").trim();
+            return {
+                text: cleanText || "Aqui está o gráfico solicitado:",
+                chartData: parsed.chart
+            };
         }
       } catch (e) {
-        // Ignore JSON parse errors
+        // If parsing fails, just return the text as is
       }
     }
 
@@ -55,6 +61,6 @@ export const streamResponse = async (
 
   } catch (error: any) {
     console.error("Stream Error:", error);
-    return { text: "Erro de conexão com o servidor." };
+    return { text: "\n⚠️ *Erro de conexão com o servidor. Verifique se o backend está rodando.*" };
   }
 };

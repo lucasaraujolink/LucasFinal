@@ -7,9 +7,13 @@ import multer from 'multer';
 import NodeCache from 'node-cache';
 import { fileURLToPath } from 'url';
 import { GoogleGenAI } from "@google/genai";
-import * as XLSX from 'xlsx';
-import mammoth from 'mammoth';
-import pdfParse from 'pdf-parse';
+import { createRequire } from 'module';
+
+// Initialize require for CommonJS modules in ESM environment
+const require = createRequire(import.meta.url);
+const XLSX = require('xlsx');
+const mammoth = require('mammoth');
+const pdfParse = require('pdf-parse');
 
 // --- CONFIGURATION ---
 const __filename = fileURLToPath(import.meta.url);
@@ -21,6 +25,7 @@ const SYSTEM_DATA_DIR = '/var/www/goncalinho_data/';
 const LOCAL_DATA_DIR = path.join(__dirname, 'data');
 let DATA_DIR = LOCAL_DATA_DIR;
 
+// Check if we can write to system dir
 try {
     if (fs.existsSync('/var/www/')) {
         if (!fs.existsSync(SYSTEM_DATA_DIR)) {
@@ -28,21 +33,24 @@ try {
                 fs.mkdirSync(SYSTEM_DATA_DIR, { recursive: true });
                 DATA_DIR = SYSTEM_DATA_DIR;
             } catch (e) {
-                console.warn("[Server] Could not create system data dir, falling back to local.");
+                console.warn("[Server] Could not create system data dir, falling back to local.", e.message);
             }
         } else {
+            // Check write permission
+            fs.accessSync(SYSTEM_DATA_DIR, fs.constants.W_OK);
             DATA_DIR = SYSTEM_DATA_DIR;
         }
     }
 } catch (e) {
-    console.warn("[Server] Checking /var/www failed, using local.");
+    console.warn("[Server] System data dir not accessible, using local.");
+    DATA_DIR = LOCAL_DATA_DIR;
 }
 
 const UPLOAD_DIR = path.join(DATA_DIR, 'uploads');
 const DB_FILE = path.join(DATA_DIR, 'db.json');
 
 // Initialize Cache (TTL 1 hour)
-const appCache = new NodeCache({ stdTTL: 3600 });
+const appCache = new NodeCache({ stdTTL: 3600, checkperiod: 600 });
 
 // --- MIDDLEWARE ---
 const app = express();
@@ -111,8 +119,9 @@ const extractText = async (filePath, mimeType, originalName) => {
             let fullText = `Arquivo Excel: ${originalName}\n`;
             workbook.SheetNames.forEach(sheetName => {
                 const sheet = workbook.Sheets[sheetName];
+                // Convert to CSV for better token efficiency than raw JSON
                 const csv = XLSX.utils.sheet_to_csv(sheet);
-                fullText += `\n--- Sheet: ${sheetName} ---\n${csv}`;
+                fullText += `\n--- Planilha: ${sheetName} ---\n${csv}`;
             });
             return fullText;
         } 
@@ -140,7 +149,12 @@ app.post('/api/upload', upload.single('file'), async (req, res) => {
     if (!req.file) return res.status(400).send('No file uploaded.');
     
     // Metadata from body
-    const metadata = JSON.parse(req.body.metadata || '{}');
+    let metadata = {};
+    try {
+        metadata = JSON.parse(req.body.metadata || '{}');
+    } catch (e) {
+        console.warn("Invalid metadata JSON");
+    }
 
     try {
         const textContent = await extractText(req.file.path, req.file.mimetype, req.file.originalname);
@@ -163,10 +177,12 @@ app.post('/api/upload', upload.single('file'), async (req, res) => {
         db.files.push(newFile);
         writeDb(db);
         
-        // Clear Cache on new data
+        // Clear Cache on new data so queries use updated context
         appCache.flushAll();
 
-        res.json({ success: true, file: { ...newFile, content: undefined } }); // Don't send huge content back
+        // Don't send huge content back to client
+        const { content, ...fileWithoutContent } = newFile;
+        res.json({ success: true, file: fileWithoutContent }); 
     } catch (error) {
         console.error("Upload error:", error);
         res.status(500).json({ error: "Processing failed" });
@@ -213,13 +229,11 @@ app.post('/api/ask', async (req, res) => {
     }
 
     // Cache Key
-    const cacheKey = `ask_${message}_${history.length}`;
+    const cacheKey = `ask_${message}_${JSON.stringify(history.length)}`;
     const cachedResponse = appCache.get(cacheKey);
 
+    // If cached, return immediately
     if (cachedResponse) {
-        // If cached, we simulate a stream or just send JSON. 
-        // For simplicity in this app structure, we send JSON and let frontend handle it, 
-        // or we stream the cached text.
         res.setHeader('Content-Type', 'text/plain; charset=utf-8');
         res.write(cachedResponse);
         res.end();
@@ -233,31 +247,39 @@ app.post('/api/ask', async (req, res) => {
     try {
         const db = readDb();
         // Prepare context from ALL files in DB
+        // Limit total tokens context window loosely by char count if needed, 
+        // but 2.5 Flash has huge context window (1M), so we concatenate mostly everything.
         const context = db.files.map(f => `
 --- ARQUIVO: ${f.name} ---
 METADADOS: Categoria: ${f.category}, Indicador: ${f.caseName}, Periodo: ${f.period}, Fonte: ${f.source}, Desc: ${f.description}
 CONTEUDO:
-${f.content ? f.content.slice(0, 25000) : ''} 
+${f.content ? f.content.slice(0, 100000) : '(Conteúdo vazio)'} 
 --- FIM ARQUIVO ---
 `).join("\n");
 
-        const systemInstruction = `Você é o Gonçalinho, analista de dados de São Gonçalo dos Campos.
-DADOS:
+        const systemInstruction = `Você é o Gonçalinho, um analista de dados especialista em indicadores de São Gonçalo dos Campos.
+        
+DADOS DISPONÍVEIS:
 ${context}
 
-INSTRUÇÕES:
-1. Responda com base APENAS nos dados acima.
-2. Se o usuário pedir gráfico, retorne APENAS um JSON válido no formato: {"chart": { "type": "bar", "data": [...] }}.
-3. Se for texto, use Markdown.
-4. Seja direto e objetivo.`;
+DIRETRIZES:
+1. Responda com base ESTRITAMENTE nos dados acima.
+2. Se a informação não estiver nos arquivos, diga que não encontrou nos dados disponíveis.
+3. Se o usuário pedir um gráfico, retorne APENAS um JSON puro no final da resposta, sem markdown de bloco de código, no formato: 
+{"chart": { "type": "bar", "title": "...", "data": [{"label": "A", "value": 10}, ...] }}
+4. Use Markdown para formatar tabelas e textos.
+5. Seja direto, técnico mas acessível.`;
 
         const ai = new GoogleGenAI({ apiKey });
         
         // Build History
-        const chatHistory = history.map(h => ({
-            role: h.role,
-            parts: [{ text: h.text }]
-        }));
+        // Filter out loading messages or error messages from frontend
+        const chatHistory = history
+            .filter(h => h.role === 'user' || h.role === 'model')
+            .map(h => ({
+                role: h.role,
+                parts: [{ text: h.text }]
+            }));
 
         const responseStream = await ai.models.generateContentStream({
             model: 'gemini-2.5-flash',
@@ -267,25 +289,29 @@ INSTRUÇÕES:
             ],
             config: {
                 systemInstruction: systemInstruction,
-                temperature: 0.3 // Lower temperature for analytical precision
+                temperature: 0.2, // Low temp for factual accuracy
             }
         });
 
         let fullText = '';
 
         for await (const chunk of responseStream) {
-            const chunkText = chunk.text();
-            fullText += chunkText;
-            res.write(chunkText);
+            const chunkText = chunk.text; // Correct property access for @google/genai
+            if (chunkText) {
+                fullText += chunkText;
+                res.write(chunkText);
+            }
         }
 
-        // Save to cache for short term
-        appCache.set(cacheKey, fullText);
+        // Save to cache
+        if (fullText.length > 0) {
+            appCache.set(cacheKey, fullText);
+        }
         res.end();
 
     } catch (error) {
         console.error("Gemini Error:", error);
-        res.write("\n\n[Sistema] Erro ao processar resposta da IA.");
+        res.write("\n\n[Sistema] Erro ao processar resposta da IA. Verifique logs do servidor.");
         res.end();
     }
 });
@@ -294,14 +320,20 @@ INSTRUÇÕES:
 const distPath = path.join(__dirname, 'dist');
 app.use(express.static(distPath));
 app.get('*', (req, res) => {
+    // If request is for API that didn't match, return 404
+    if (req.path.startsWith('/api')) {
+        return res.status(404).json({error: "API endpoint not found"});
+    }
+    
+    // Otherwise serve index.html for React Router
     if (fs.existsSync(path.join(distPath, 'index.html'))) {
         res.sendFile(path.join(distPath, 'index.html'));
     } else {
-        res.send("Backend running. Frontend not built.");
+        res.send("Backend running. Frontend not built. Run 'npm run build' first.");
     }
 });
 
 app.listen(PORT, () => {
     console.log(`Gonçalinho Server running on port ${PORT}`);
-    console.log(`Data Dir: ${DATA_DIR}`);
+    console.log(`Data Storage: ${DATA_DIR}`);
 });
