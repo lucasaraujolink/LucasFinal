@@ -1,0 +1,5 @@
+{
+  "name": "Copy of PMSGC - Chat",
+  "description": "A powerful data analysis chat system capable of processing CSV, XLSX, DOCX, and TXT files to compare indicators and visualize data using Gemini 2.5.",
+  "requestFramePermissions": []
+}
