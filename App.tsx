@@ -362,26 +362,33 @@ function App() {
                       </div>
 
                       <div className="space-y-5">
-                        {/* Form inputs same as before... */}
+                        
                         <div>
                           <label className="block text-xs font-semibold text-sky-400 mb-1.5 uppercase tracking-wider flex items-center gap-1"><Tag size={12} /> Categoria</label>
                           <select className="w-full bg-slate-950 border border-slate-700 rounded-lg p-3 text-sm focus:border-sky-500 outline-none text-slate-200" value={metadataForm.category} onChange={e => setMetadataForm({...metadataForm, category: e.target.value as FileCategory})}>
                             {CATEGORIES.map(cat => <option key={cat} value={cat}>{cat}</option>)}
                           </select>
                         </div>
+                        
+                        <div className="grid grid-cols-2 gap-4">
+                            <div>
+                                <label className="block text-xs font-semibold text-amber-400 mb-1.5 uppercase tracking-wider">Indicador</label>
+                                <input type="text" className="w-full bg-slate-950 border border-slate-700 rounded-lg p-3 text-sm outline-none placeholder-slate-600" placeholder="Ex: PIB" value={metadataForm.caseName} onChange={e => setMetadataForm({...metadataForm, caseName: e.target.value})} />
+                            </div>
+                            <div>
+                                <label className="block text-xs font-semibold text-slate-400 mb-1.5 uppercase tracking-wider">Período</label>
+                                <input type="text" className="w-full bg-slate-950 border border-slate-700 rounded-lg p-3 text-sm outline-none placeholder-slate-600" placeholder="Ex: 2023" value={metadataForm.period} onChange={e => setMetadataForm({...metadataForm, period: e.target.value})} />
+                            </div>
+                        </div>
+
                         <div>
                           <label className="block text-xs font-semibold text-slate-400 mb-1.5 uppercase tracking-wider">Descrição</label>
                           <input type="text" className="w-full bg-slate-950 border border-slate-700 rounded-lg p-3 text-sm focus:border-sky-500 outline-none placeholder-slate-600" placeholder="Ex: Tabela de casos 2024" value={metadataForm.description} onChange={e => setMetadataForm({...metadataForm, description: e.target.value})} />
                         </div>
-                        <div className="grid grid-cols-2 gap-4">
-                          <div>
-                            <label className="block text-xs font-semibold text-slate-400 mb-1.5 uppercase tracking-wider">Período</label>
-                            <input type="text" className="w-full bg-slate-950 border border-slate-700 rounded-lg p-3 text-sm outline-none" placeholder="Ex: 2023" value={metadataForm.period} onChange={e => setMetadataForm({...metadataForm, period: e.target.value})} />
-                          </div>
-                          <div>
-                            <label className="block text-xs font-semibold text-amber-400 mb-1.5 uppercase tracking-wider">Indicador</label>
-                            <input type="text" className="w-full bg-slate-950 border border-slate-700 rounded-lg p-3 text-sm outline-none" placeholder="Ex: PIB" value={metadataForm.caseName} onChange={e => setMetadataForm({...metadataForm, caseName: e.target.value})} />
-                          </div>
+
+                        <div>
+                            <label className="block text-xs font-semibold text-slate-400 mb-1.5 uppercase tracking-wider">Fonte de Dados</label>
+                            <input type="text" className="w-full bg-slate-950 border border-slate-700 rounded-lg p-3 text-sm focus:border-sky-500 outline-none placeholder-slate-600" placeholder="Ex: IBGE, Secretaria de Saúde..." value={metadataForm.source} onChange={e => setMetadataForm({...metadataForm, source: e.target.value})} />
                         </div>
 
                         <button 
@@ -425,7 +432,7 @@ function App() {
                       </div>
                       <div className="grid grid-cols-2 gap-y-1 gap-x-4 text-xs text-slate-400 bg-slate-950/50 p-3 rounded-lg border border-slate-800/50">
                           <div><span className="text-slate-500 font-medium">Período:</span> {file.period}</div>
-                          <div><span className="text-slate-500 font-medium">Fonte:</span> {file.source}</div>
+                          <div><span className="text-slate-500 font-medium">Fonte:</span> {file.source || '-'}</div>
                       </div>
                     </div>
                   ))}

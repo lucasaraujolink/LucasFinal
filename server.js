@@ -265,7 +265,7 @@ ${context}
 DIRETRIZES:
 1. Responda com base ESTRITAMENTE nos dados acima.
 2. Se a informação não estiver nos arquivos, diga que não encontrou nos dados disponíveis.
-3. Se o usuário pedir um gráfico, retorne APENAS um JSON puro no final da resposta, sem markdown de bloco de código, no formato: 
+3. SEMPRE que a resposta envolver comparação de dados numéricos (ex: entre cidades, anos, categorias) ou apresentar uma série de dados estatísticos, gere AUTOMATICAMENTE um gráfico representativo. Retorne o JSON do gráfico no final da resposta, sem markdown de bloco de código, no formato: 
 {"chart": { "type": "bar", "title": "...", "data": [{"label": "A", "value": 10}, ...] }}
 4. Use Markdown para formatar tabelas e textos.
 5. Seja direto, técnico mas acessível.`;
