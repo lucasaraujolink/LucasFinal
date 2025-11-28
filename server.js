@@ -20,31 +20,47 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 const PORT = process.env.PORT || 3001;
 
-// Define Data Directory - Prioritize prompt request, fallback to local for dev safety
-const SYSTEM_DATA_DIR = '/var/www/goncalinho_data/';
-const LOCAL_DATA_DIR = path.join(__dirname, 'data');
-let DATA_DIR = LOCAL_DATA_DIR;
+// --- DATA DIRECTORY SETUP ---
+// Priority:
+// 1. env.STORAGE_PATH
+// 2. /var/www/goncalinho_data/ (Preferred Persistence)
+// 3. ./data (Local Fallback)
 
-// Check if we can write to system dir
-try {
-    if (fs.existsSync('/var/www/')) {
-        if (!fs.existsSync(SYSTEM_DATA_DIR)) {
-            try {
-                fs.mkdirSync(SYSTEM_DATA_DIR, { recursive: true });
-                DATA_DIR = SYSTEM_DATA_DIR;
-            } catch (e) {
-                console.warn("[Server] Could not create system data dir, falling back to local.", e.message);
-            }
-        } else {
-            // Check write permission
-            fs.accessSync(SYSTEM_DATA_DIR, fs.constants.W_OK);
-            DATA_DIR = SYSTEM_DATA_DIR;
+const PREFERRED_SYSTEM_PATH = '/var/www/goncalinho_data/';
+const LOCAL_FALLBACK_PATH = path.join(__dirname, 'data');
+let DATA_DIR = LOCAL_FALLBACK_PATH; // Default to local initially
+
+const configuredPath = process.env.STORAGE_PATH;
+
+if (configuredPath) {
+    DATA_DIR = configuredPath;
+} else {
+    // Try to use the preferred persistent path
+    try {
+        // Create directory recursively (creates /var/www if missing and allowed)
+        if (!fs.existsSync(PREFERRED_SYSTEM_PATH)) {
+            fs.mkdirSync(PREFERRED_SYSTEM_PATH, { recursive: true });
+        }
+        
+        // Test write permission by writing a temp file
+        const testFile = path.join(PREFERRED_SYSTEM_PATH, '.perm_test');
+        fs.writeFileSync(testFile, 'test');
+        fs.unlinkSync(testFile);
+
+        // If successful, use this path
+        DATA_DIR = PREFERRED_SYSTEM_PATH;
+    } catch (e) {
+        console.warn(`[Server] ⚠️  Could not use persistent path '${PREFERRED_SYSTEM_PATH}'. Reason: ${e.message}`);
+        console.warn(`[Server] ⚠️  Falling back to local ephemeral storage: '${LOCAL_FALLBACK_PATH}'. DATA WILL BE LOST ON REDEPLOY.`);
+        
+        // Ensure fallback exists
+        if (!fs.existsSync(LOCAL_FALLBACK_PATH)) {
+            fs.mkdirSync(LOCAL_FALLBACK_PATH, { recursive: true });
         }
     }
-} catch (e) {
-    console.warn("[Server] System data dir not accessible, using local.");
-    DATA_DIR = LOCAL_DATA_DIR;
 }
+
+console.log(`[Server] 📂 STORAGE DIRECTORY: ${DATA_DIR}`);
 
 const UPLOAD_DIR = path.join(DATA_DIR, 'uploads');
 const DB_FILE = path.join(DATA_DIR, 'db.json');
@@ -80,11 +96,13 @@ const initializeDb = () => {
         if (!fs.existsSync(UPLOAD_DIR)) fs.mkdirSync(UPLOAD_DIR, { recursive: true });
 
         if (!fs.existsSync(DB_FILE)) {
-            console.log(`[Server] Criando DB em: ${DB_FILE}`);
+            console.log(`[Server] 📝 Creating new Database at: ${DB_FILE}`);
             fs.writeFileSync(DB_FILE, JSON.stringify({ files: [] }, null, 2), 'utf8');
+        } else {
+            console.log(`[Server] ✅ Database loaded from: ${DB_FILE}`);
         }
     } catch (err) {
-        console.error("[Server] Erro fatal init DB:", err);
+        console.error("[Server] ❌ Fatal Error initializing DB:", err);
     }
 };
 initializeDb();
@@ -102,7 +120,7 @@ const writeDb = (data) => {
     try {
         fs.writeFileSync(DB_FILE, JSON.stringify(data, null, 2), 'utf8');
     } catch (err) {
-        console.error("[Server] Erro save DB:", err);
+        console.error("[Server] Error saving DB:", err);
     }
 };
 
@@ -224,7 +242,9 @@ const removeAccents = (str) => {
     return str.normalize("NFD").replace(/[\u0300-\u036f]/g, "").toLowerCase();
 };
 
-// 4. ASK API (Streaming + Caching)
+const sleep = (ms) => new Promise(resolve => setTimeout(resolve, ms));
+
+// 4. ASK API (Streaming + Caching + Retry)
 app.post('/api/ask', async (req, res) => {
     const { message, history } = req.body;
     const apiKey = process.env.API_KEY;
@@ -252,14 +272,14 @@ app.post('/api/ask', async (req, res) => {
     try {
         const db = readDb();
         
-        // --- OPTIMIZATION FOR 429 ERRORS ---
-        // 1. Simple Keyword Relevance (Very basic RAG)
-        // If we have too many files, we filter. If few files, we send all.
-        const MAX_CONTEXT_CHARS = 250000; // Safe limit for Gemini Flash Free Tier (~60k tokens)
+        // --- OPTIMIZATION FOR 503/429 ERRORS ---
+        // Reduced context size to prevent "Model Overloaded"
+        const MAX_CONTEXT_CHARS = 150000; 
         
         // Normalize keywords: remove accents and lower case
         const normalizedMessage = removeAccents(message);
-        const keywords = normalizedMessage.split(' ').filter(w => w.length > 3);
+        // Extract terms longer than 3 chars for search
+        const keywords = normalizedMessage.split(/[^a-z0-9]/).filter(w => w.length > 3);
         
         let sortedFiles = db.files.map(f => {
             let score = 0;
@@ -328,25 +348,47 @@ DIRETRIZES GERAIS:
                 parts: [{ text: h.text }]
             }));
 
-        const responseStream = await ai.models.generateContentStream({
-            model: 'gemini-2.5-flash',
-            contents: [
-                ...chatHistory,
-                { role: 'user', parts: [{ text: message }] }
-            ],
-            config: {
-                systemInstruction: systemInstruction,
-                temperature: 0.2,
+        // --- RETRY LOGIC FOR 503/429 ---
+        let responseStream = null;
+        const maxRetries = 3;
+        
+        for (let attempt = 1; attempt <= maxRetries; attempt++) {
+            try {
+                responseStream = await ai.models.generateContentStream({
+                    model: 'gemini-2.5-flash',
+                    contents: [
+                        ...chatHistory,
+                        { role: 'user', parts: [{ text: message }] }
+                    ],
+                    config: {
+                        systemInstruction: systemInstruction,
+                        temperature: 0.2,
+                    }
+                });
+                break; // Success! Exit loop
+            } catch (err) {
+                // If it's the last attempt, throw it to the outer catch
+                if (attempt === maxRetries) throw err;
+
+                // Check for transient errors (503 Overloaded, 429 Too Many Requests)
+                if (err.status === 503 || err.status === 429 || err.message?.includes('overloaded') || err.message?.includes('quota')) {
+                    console.log(`[Gemini] Attempt ${attempt} failed (Status ${err.status}). Retrying in ${attempt * 2}s...`);
+                    await sleep(2000 * attempt); // Linear backoff: 2s, 4s...
+                } else {
+                    // Non-recoverable error
+                    throw err;
+                }
             }
-        });
+        }
 
         let fullText = '';
-
-        for await (const chunk of responseStream) {
-            const chunkText = chunk.text;
-            if (chunkText) {
-                fullText += chunkText;
-                res.write(chunkText);
+        if (responseStream) {
+            for await (const chunk of responseStream) {
+                const chunkText = chunk.text;
+                if (chunkText) {
+                    fullText += chunkText;
+                    res.write(chunkText);
+                }
             }
         }
 
@@ -356,11 +398,11 @@ DIRETRIZES GERAIS:
         res.end();
 
     } catch (error) {
-        console.error("Gemini Error:", error);
+        console.error("Gemini Error Final:", error);
         
-        // Handle Rate Limit specifically
-        if (error.status === 429 || error.message?.includes("429") || error.message?.includes("quota")) {
-            res.write("\n\n⚠️ *O sistema está com alto volume de dados (Limite de Cota Atingido). Por favor, aguarde 30 segundos e tente novamente com uma pergunta mais específica.*");
+        // Handle Rate Limit / Overload specifically
+        if (error.status === 429 || error.status === 503 || error.message?.includes("overloaded") || error.message?.includes("quota")) {
+            res.write("\n\n⚠️ *O sistema está com alto volume de processamento (Modelo sobrecarregado). Aguardei e tentei reconectar, mas não foi possível no momento. Por favor, tente novamente em 1 minuto.*");
         } else {
             res.write("\n\n[Sistema] Erro ao processar resposta da IA. Verifique logs do servidor.");
         }
@@ -387,5 +429,4 @@ app.get('*', (req, res) => {
 
 app.listen(PORT, () => {
     console.log(`Gonçalinho Server running on port ${PORT}`);
-    console.log(`Data Storage: ${DATA_DIR}`);
 });
