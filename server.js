@@ -246,21 +246,59 @@ app.post('/api/ask', async (req, res) => {
 
     try {
         const db = readDb();
-        // Prepare context from ALL files in DB
-        // Limit total tokens context window loosely by char count if needed, 
-        // but 2.5 Flash has huge context window (1M), so we concatenate mostly everything.
-        const context = db.files.map(f => `
+        
+        // --- OPTIMIZATION FOR 429 ERRORS ---
+        // 1. Simple Keyword Relevance (Very basic RAG)
+        // If we have too many files, we filter. If few files, we send all.
+        const MAX_CONTEXT_CHARS = 250000; // Safe limit for Gemini Flash Free Tier (~60k tokens)
+        
+        // Sort files by relevance (keyword match in name/metadata/content)
+        const keywords = message.toLowerCase().split(' ').filter(w => w.length > 3);
+        
+        let sortedFiles = db.files.map(f => {
+            let score = 0;
+            const fullMeta = `${f.name} ${f.caseName} ${f.category} ${f.description}`.toLowerCase();
+            keywords.forEach(k => {
+                if (fullMeta.includes(k)) score += 10;
+                // Don't search heavy content for score to save CPU, just assume metadata is good enough for sorting
+            });
+            return { file: f, score };
+        }).sort((a, b) => b.score - a.score);
+
+        // 2. Build Context respecting limit
+        let currentChars = 0;
+        let selectedContext = "";
+
+        for (const item of sortedFiles) {
+            const f = item.file;
+            // Reduce per-file limit to 30,000 chars to allow more files in the window
+            // (Previously was 100,000 which caused the 429 error quickly with multiple files)
+            const contentSnippet = f.content ? f.content.slice(0, 30000) : ''; 
+            
+            const fileBlock = `
 --- ARQUIVO: ${f.name} ---
 METADADOS: Categoria: ${f.category}, Indicador: ${f.caseName}, Periodo: ${f.period}, Fonte: ${f.source}, Desc: ${f.description}
 CONTEUDO:
-${f.content ? f.content.slice(0, 100000) : '(Conteúdo vazio)'} 
+${contentSnippet} 
 --- FIM ARQUIVO ---
-`).join("\n");
+`;
+            if (currentChars + fileBlock.length < MAX_CONTEXT_CHARS) {
+                selectedContext += fileBlock;
+                currentChars += fileBlock.length;
+            } else {
+                break; // Stop adding files if we hit the limit
+            }
+        }
 
         const systemInstruction = `Você é o Gonçalinho, um analista de dados especialista em indicadores de São Gonçalo dos Campos.
-        
+
+CONTEXTO GEOGRÁFICO:
+- Se o usuário não especificar a cidade, ASSUMA AUTOMATICAMENTE que se refere a "São Gonçalo dos Campos".
+- As siglas "SGC" e "Songa" significam "São Gonçalo dos Campos".
+- Priorize dados locais desta cidade ao responder, a menos que uma comparação explícita seja solicitada.
+
 DADOS DISPONÍVEIS:
-${context}
+${selectedContext}
 
 DIRETRIZES:
 1. Responda com base ESTRITAMENTE nos dados acima.
@@ -272,8 +310,6 @@ DIRETRIZES:
 
         const ai = new GoogleGenAI({ apiKey });
         
-        // Build History
-        // Filter out loading messages or error messages from frontend
         const chatHistory = history
             .filter(h => h.role === 'user' || h.role === 'model')
             .map(h => ({
@@ -289,21 +325,20 @@ DIRETRIZES:
             ],
             config: {
                 systemInstruction: systemInstruction,
-                temperature: 0.2, // Low temp for factual accuracy
+                temperature: 0.2,
             }
         });
 
         let fullText = '';
 
         for await (const chunk of responseStream) {
-            const chunkText = chunk.text; // Correct property access for @google/genai
+            const chunkText = chunk.text;
             if (chunkText) {
                 fullText += chunkText;
                 res.write(chunkText);
             }
         }
 
-        // Save to cache
         if (fullText.length > 0) {
             appCache.set(cacheKey, fullText);
         }
@@ -311,7 +346,13 @@ DIRETRIZES:
 
     } catch (error) {
         console.error("Gemini Error:", error);
-        res.write("\n\n[Sistema] Erro ao processar resposta da IA. Verifique logs do servidor.");
+        
+        // Handle Rate Limit specifically
+        if (error.status === 429 || error.message?.includes("429") || error.message?.includes("quota")) {
+            res.write("\n\n⚠️ *O sistema está com alto volume de dados (Limite de Cota Atingido). Por favor, aguarde 30 segundos e tente novamente com uma pergunta mais específica.*");
+        } else {
+            res.write("\n\n[Sistema] Erro ao processar resposta da IA. Verifique logs do servidor.");
+        }
         res.end();
     }
 });
