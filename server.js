@@ -219,6 +219,11 @@ app.delete('/files/:id', (req, res) => {
     res.json({ success: true });
 });
 
+// Helper for removing accents
+const removeAccents = (str) => {
+    return str.normalize("NFD").replace(/[\u0300-\u036f]/g, "").toLowerCase();
+};
+
 // 4. ASK API (Streaming + Caching)
 app.post('/api/ask', async (req, res) => {
     const { message, history } = req.body;
@@ -252,15 +257,17 @@ app.post('/api/ask', async (req, res) => {
         // If we have too many files, we filter. If few files, we send all.
         const MAX_CONTEXT_CHARS = 250000; // Safe limit for Gemini Flash Free Tier (~60k tokens)
         
-        // Sort files by relevance (keyword match in name/metadata/content)
-        const keywords = message.toLowerCase().split(' ').filter(w => w.length > 3);
+        // Normalize keywords: remove accents and lower case
+        const normalizedMessage = removeAccents(message);
+        const keywords = normalizedMessage.split(' ').filter(w => w.length > 3);
         
         let sortedFiles = db.files.map(f => {
             let score = 0;
-            const fullMeta = `${f.name} ${f.caseName} ${f.category} ${f.description}`.toLowerCase();
+            // Normalize metadata for comparison
+            const fullMeta = removeAccents(`${f.name} ${f.caseName} ${f.category} ${f.description}`);
+            
             keywords.forEach(k => {
                 if (fullMeta.includes(k)) score += 10;
-                // Don't search heavy content for score to save CPU, just assume metadata is good enough for sorting
             });
             return { file: f, score };
         }).sort((a, b) => b.score - a.score);
@@ -272,7 +279,6 @@ app.post('/api/ask', async (req, res) => {
         for (const item of sortedFiles) {
             const f = item.file;
             // Reduce per-file limit to 30,000 chars to allow more files in the window
-            // (Previously was 100,000 which caused the 429 error quickly with multiple files)
             const contentSnippet = f.content ? f.content.slice(0, 30000) : ''; 
             
             const fileBlock = `
@@ -293,17 +299,22 @@ ${contentSnippet}
         const systemInstruction = `Você é o Gonçalinho, um analista de dados especialista em indicadores de São Gonçalo dos Campos.
 
 CONTEXTO GEOGRÁFICO:
-- Se o usuário não especificar a cidade, ASSUMA AUTOMATICAMENTE que se refere a "São Gonçalo dos Campos".
-- As siglas "SGC" e "Songa" significam "São Gonçalo dos Campos".
-- Priorize dados locais desta cidade ao responder, a menos que uma comparação explícita seja solicitada.
+- Cidade Base: "São Gonçalo dos Campos".
+- Variações reconhecidas: "SGC", "Songa", "São Gonçalo", "Sao Goncalo dos Campos", "Sao Goncalo".
+- Se o usuário mencionar qualquer uma dessas variações ou não especificar a cidade, ASSUMA AUTOMATICAMENTE que se refere à cidade base (São Gonçalo dos Campos).
+
+PADRÃO DE COMPARAÇÃO (REGRA CRÍTICA):
+- SEMPRE que houver comparação de dados entre cidades (ex: casos de dengue em SGC vs Feira de Santana), VOCÊ DEVE CALCULAR A TAXA POR 1.000 HABITANTES.
+- Fórmula: (Quantidade Absoluta / População Total) * 1000.
+- Nunca compare apenas números absolutos, pois isso gera distorções. Apresente os números absolutos, mas baseie a conclusão na taxa por mil habitantes.
 
 DADOS DISPONÍVEIS:
 ${selectedContext}
 
-DIRETRIZES:
+DIRETRIZES GERAIS:
 1. Responda com base ESTRITAMENTE nos dados acima.
 2. Se a informação não estiver nos arquivos, diga que não encontrou nos dados disponíveis.
-3. SEMPRE que a resposta envolver comparação de dados numéricos (ex: entre cidades, anos, categorias) ou apresentar uma série de dados estatísticos, gere AUTOMATICAMENTE um gráfico representativo. Retorne o JSON do gráfico no final da resposta, sem markdown de bloco de código, no formato: 
+3. Gere gráficos JSON automaticamente para comparações numéricas ou séries temporais no formato: 
 {"chart": { "type": "bar", "title": "...", "data": [{"label": "A", "value": 10}, ...] }}
 4. Use Markdown para formatar tabelas e textos.
 5. Seja direto, técnico mas acessível.`;
