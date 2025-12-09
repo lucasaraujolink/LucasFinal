@@ -17,6 +17,7 @@ const CATEGORIES: FileCategory[] = [
   'Esporte cultura e lazer',
   'Saúde',
   'Gabinete',
+  'Agricultura',
   'Geral'
 ];
 
@@ -235,6 +236,7 @@ function App() {
         case 'Finanças': return 'text-emerald-400 bg-emerald-400/10 border-emerald-400/20';
         case 'Educação': return 'text-blue-400 bg-blue-400/10 border-blue-400/20';
         case 'Infraestrutura': return 'text-amber-400 bg-amber-400/10 border-amber-400/20';
+        case 'Agricultura': return 'text-lime-400 bg-lime-400/10 border-lime-400/20';
         default: return 'text-slate-400 bg-slate-400/10 border-slate-400/20';
     }
   }
