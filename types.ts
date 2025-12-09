@@ -17,6 +17,7 @@ export type FileCategory =
   | 'Esporte cultura e lazer'
   | 'Saúde'
   | 'Gabinete'
+  | 'Agricultura'
   | 'Geral';
 
 export interface UploadedFile {
